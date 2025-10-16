@@ -13,6 +13,7 @@ import type {
   User,
 } from './context'
 import type { ReactNode } from 'react'
+import { ApiError, sendVerificationEmail as sendVerificationEmailRequest } from '../services/api'
 
 type StoredAccount = {
   id: string
@@ -102,32 +103,17 @@ const createVerificationCode = () => Math.floor(100000 + Math.random() * 900000)
 const sendVerificationEmail = async ({ email, code, name }: { email: string; code: string; name: string }) => {
   if (typeof window === 'undefined') return
   try {
-    const res = await fetch('/api/send-verification', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, code, name }),
-    })
-    if (!res.ok) {
-      let reason = res.statusText || 'Не вдалося надіслати лист'
-      try {
-        const data = await res.json()
-        if (data && typeof data === 'object' && 'error' in data && typeof data.error === 'string') {
-          reason = data.error
-        }
-      } catch {
-        // ignore JSON issues
-      }
-      throw new Error(reason)
-    }
+    await sendVerificationEmailRequest({ email, code, name })
   } catch (error) {
-    const message =
-      error instanceof Error
-        ? `${error.message}${
-            error.message.includes('Failed to fetch') || error.message.includes('Network')
-              ? '. Переконайтесь, що API сервер запущено (python server.py).'
-              : ''
-          }`
-        : 'Не вдалося надіслати лист підтвердження'
+    let message =
+      error instanceof ApiError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : 'Не вдалося надіслати лист підтвердження'
+    if (message.includes('Failed to fetch') || message.includes('Network')) {
+      message += '. Переконайтесь, що API сервер запущено (python server.py).'
+    }
     throw new Error(message)
   }
 }
