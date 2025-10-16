@@ -1,16 +1,43 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AuthContext } from './context'
+import type {
+  EnableTwoFactorResult,
+  LoginPayload,
+  LoginResult,
+  RecoverAccountPayload,
+  RecoverAccountResult,
+  RegisterPayload,
+  RegisterResult,
+  UpdatePayload,
+  VerifyTwoFactorPayload,
+  User,
+} from './context'
 import type { ReactNode } from 'react'
-import type { LoginPayload, RegisterPayload, UpdatePayload, User } from './context'
 
-type StoredAccount = User & { password: string }
+type StoredAccount = {
+  id: string
+  name: string
+  email: string
+  createdAt: string
+  password: string
+  twoFactorEnabled: boolean
+  twoFactorSecret?: string
+  recoveryCodes: string[]
+}
+
+type TwoFactorChallenge = {
+  challengeId: string
+  accountId: string
+  issuedAt: number
+}
 
 const ACTIVE_USER_KEY = 'user'
 const ACCOUNTS_KEY = 'auth:accounts'
+const CHALLENGE_EXPIRY_MS = 5 * 60 * 1000
 
 const createId = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
-  return `user-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+  return `id-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
 }
 
 const normalizeName = (name: string) => {
@@ -20,9 +47,11 @@ const normalizeName = (name: string) => {
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase()
 
+const normalizeCode = (code: string) => code.replace(/\s+/g, '').toUpperCase()
+
 const toUser = (raw: unknown): User | null => {
   if (!raw || typeof raw !== 'object') return null
-  const record = raw as Partial<User> & { name?: unknown; email?: unknown; id?: unknown; createdAt?: unknown }
+  const record = raw as Partial<User> & { name?: unknown; email?: unknown; id?: unknown; createdAt?: unknown; twoFactorEnabled?: unknown }
   const name = typeof record.name === 'string' ? normalizeName(record.name) : 'Користувач'
   const email = typeof record.email === 'string' ? normalizeEmail(record.email) : ''
   const id = typeof record.id === 'string' && record.id ? record.id : createId()
@@ -30,7 +59,50 @@ const toUser = (raw: unknown): User | null => {
     typeof record.createdAt === 'string' && record.createdAt
       ? record.createdAt
       : new Date().toISOString()
-  return { id, name, email, createdAt }
+  const twoFactorEnabled = typeof record.twoFactorEnabled === 'boolean' ? record.twoFactorEnabled : false
+  return { id, name, email, createdAt, twoFactorEnabled }
+}
+
+const randomFrom = <T,>(items: ReadonlyArray<T>) => items[Math.floor(Math.random() * items.length)]
+
+const generateRecoveryCode = () => {
+  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+  const part = () =>
+    Array.from({ length: 4 })
+      .map(() => randomFrom(alphabet))
+      .join('')
+  return `${part()}-${part()}`
+}
+
+const generateRecoveryCodes = (count = 6) => Array.from({ length: count }, generateRecoveryCode)
+
+const generateTwoFactorSecret = () => {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  return Array.from({ length: 16 })
+    .map(() => randomFrom(alphabet))
+    .join('')
+}
+
+const hashString = (value: string) => {
+  let hash = 5381
+  for (let i = 0; i < value.length; i += 1) {
+    hash = ((hash << 5) + hash) ^ value.charCodeAt(i)
+  }
+  return hash >>> 0
+}
+
+const generateTwoFactorCode = (secret: string, timestamp = Date.now()) => {
+  const window = Math.floor(timestamp / 30000)
+  const hash = hashString(`${secret}:${window}`)
+  return (hash % 1000000).toString().padStart(6, '0')
+}
+
+const verifyTwoFactorCode = (secret: string, code: string) => {
+  const sanitized = code.replace(/\s+/g, '')
+  if (!/^\d{6}$/.test(sanitized)) return false
+  const now = Date.now()
+  const windows = [0, -1, 1]
+  return windows.some((offset) => generateTwoFactorCode(secret, now + offset * 30000) === sanitized)
 }
 
 const toStoredAccount = (raw: unknown): StoredAccount | null => {
@@ -39,7 +111,19 @@ const toStoredAccount = (raw: unknown): StoredAccount | null => {
   if (!base) return null
   const record = raw as Partial<StoredAccount>
   if (!record.password || typeof record.password !== 'string') return null
-  return { ...base, password: record.password }
+  const recoveryCodes = Array.isArray(record.recoveryCodes)
+    ? record.recoveryCodes.filter((c): c is string => typeof c === 'string' && !!c)
+    : []
+  return {
+    id: base.id,
+    name: base.name,
+    email: base.email,
+    createdAt: base.createdAt,
+    twoFactorEnabled: base.twoFactorEnabled,
+    password: record.password,
+    twoFactorSecret: record.twoFactorSecret && typeof record.twoFactorSecret === 'string' ? record.twoFactorSecret : undefined,
+    recoveryCodes: recoveryCodes.length ? recoveryCodes : generateRecoveryCodes(),
+  }
 }
 
 export default function AuthProvider({ children }: { children: ReactNode }) {
@@ -57,6 +141,8 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       return []
     }
   })
+
+  const [challenges, setChallenges] = useState<Record<string, TwoFactorChallenge>>({})
 
   const [user, setUser] = useState<User | null>(() => {
     if (typeof window === 'undefined') return null
@@ -87,44 +173,152 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [accounts])
 
+  const cleanupChallenges = useCallback(() => {
+    setChallenges((prev) => {
+      const now = Date.now()
+      const nextEntries = Object.entries(prev).filter(([, value]) => value.issuedAt + CHALLENGE_EXPIRY_MS > now)
+      return Object.fromEntries(nextEntries)
+    })
+  }, [])
+
+  useEffect(() => {
+    const id = setInterval(cleanupChallenges, 60 * 1000)
+    return () => clearInterval(id)
+  }, [cleanupChallenges])
+
   const logout = useCallback(() => {
     setUser(null)
   }, [])
 
   const register = useCallback(
-    async ({ name, email, password }: RegisterPayload) => {
+    async ({ name, email, password }: RegisterPayload): Promise<RegisterResult> => {
       const normalizedEmail = normalizeEmail(email)
       const normalizedName = normalizeName(name)
       if (!normalizedEmail) throw new Error('Вкажіть email')
-      if (!password || password.trim().length < 4) throw new Error('Пароль має містити щонайменше 4 символи')
+      if (!password || password.trim().length < 6) throw new Error('Пароль має містити щонайменше 6 символів')
       const exists = accounts.some((acc) => acc.email === normalizedEmail)
       if (exists) throw new Error('Користувач з таким email вже існує')
-      const newUser: User = {
+      const now = new Date().toISOString()
+      const newRecoveryCodes = generateRecoveryCodes()
+      const secret = generateTwoFactorSecret()
+      const newAccount: StoredAccount = {
         id: createId(),
         name: normalizedName,
         email: normalizedEmail,
-        createdAt: new Date().toISOString(),
+        createdAt: now,
+        password: password.trim(),
+        twoFactorEnabled: false,
+        twoFactorSecret: secret,
+        recoveryCodes: newRecoveryCodes,
       }
-      const newAccount: StoredAccount = { ...newUser, password: password.trim() }
       setAccounts((prev) => [...prev, newAccount])
+      const newUser: User = {
+        id: newAccount.id,
+        name: newAccount.name,
+        email: newAccount.email,
+        createdAt: newAccount.createdAt,
+        twoFactorEnabled: newAccount.twoFactorEnabled,
+      }
       setUser(newUser)
-      return newUser
+      return { user: newUser, recoveryCodes: newRecoveryCodes }
     },
     [accounts],
   )
 
+  const issueChallenge = useCallback(
+    (account: StoredAccount) => {
+      const challengeId = createId()
+      const issuedAt = Date.now()
+      setChallenges((prev) => ({ ...prev, [challengeId]: { challengeId, accountId: account.id, issuedAt } }))
+      const code = account.twoFactorSecret ? generateTwoFactorCode(account.twoFactorSecret, issuedAt) : generateTwoFactorCode(account.id, issuedAt)
+      return {
+        challengeId,
+        message: `Введіть код із додатку або резервний код. Поточний код (для тесту): ${code}`,
+      }
+    },
+    [],
+  )
+
   const login = useCallback(
-    async ({ email, password }: LoginPayload) => {
+    async ({ email, password, code }: LoginPayload): Promise<LoginResult> => {
       const normalizedEmail = normalizeEmail(email)
       const account = accounts.find((acc) => acc.email === normalizedEmail)
       if (!account || account.password !== password.trim()) {
         throw new Error('Неправильний email або пароль')
       }
-      const nextUser: User = { id: account.id, name: account.name, email: account.email, createdAt: account.createdAt }
+      if (account.twoFactorEnabled) {
+        if (code && account.twoFactorSecret && verifyTwoFactorCode(account.twoFactorSecret, code)) {
+          const nextUser: User = {
+            id: account.id,
+            name: account.name,
+            email: account.email,
+            createdAt: account.createdAt,
+            twoFactorEnabled: true,
+          }
+          setUser(nextUser)
+          return { status: 'success', user: nextUser }
+        }
+        const challenge = issueChallenge(account)
+        if (code) throw new Error('Невірний код двофакторної перевірки')
+        return { status: 'two-factor', challengeId: challenge.challengeId, message: challenge.message }
+      }
+      const nextUser: User = {
+        id: account.id,
+        name: account.name,
+        email: account.email,
+        createdAt: account.createdAt,
+        twoFactorEnabled: false,
+      }
       setUser(nextUser)
+      return { status: 'success', user: nextUser }
+    },
+    [accounts, issueChallenge],
+  )
+
+  const verifyTwoFactor = useCallback(
+    async ({ challengeId, code, recoveryCode }: VerifyTwoFactorPayload) => {
+      const challenge = challenges[challengeId]
+      if (!challenge) throw new Error('Запит 2FA не знайдено або він протермінований')
+      const account = accounts.find((acc) => acc.id === challenge.accountId)
+      if (!account) throw new Error('Акаунт не знайдено')
+      let success = false
+      let usedRecovery = false
+      if (recoveryCode) {
+        const normalizedRecovery = normalizeCode(recoveryCode)
+        const matches = account.recoveryCodes.some((rc) => normalizeCode(rc) === normalizedRecovery)
+        if (!matches) throw new Error('Невірний резервний код')
+        usedRecovery = true
+        account.recoveryCodes = account.recoveryCodes.filter((rc) => normalizeCode(rc) !== normalizedRecovery)
+        success = true
+      } else if (code && account.twoFactorSecret) {
+        success = verifyTwoFactorCode(account.twoFactorSecret, code)
+        if (!success) throw new Error('Невірний код 2FA')
+      } else {
+        throw new Error('Вкажіть код 2FA або резервний код')
+      }
+      if (!success) throw new Error('Не вдалося підтвердити 2FA')
+      const nextUser: User = {
+        id: account.id,
+        name: account.name,
+        email: account.email,
+        createdAt: account.createdAt,
+        twoFactorEnabled: account.twoFactorEnabled,
+      }
+      setUser(nextUser)
+      setAccounts((prev) => prev.map((acc) => (acc.id === account.id ? { ...account } : acc)))
+      setChallenges((prev) => {
+        const { [challengeId]: _, ...rest } = prev
+        return rest
+      })
+      if (usedRecovery && !account.recoveryCodes.length) {
+        const refreshed = generateRecoveryCodes()
+        setAccounts((prev) =>
+          prev.map((acc) => (acc.id === account.id ? { ...acc, recoveryCodes: refreshed } : acc)),
+        )
+      }
       return nextUser
     },
-    [accounts],
+    [accounts, challenges],
   )
 
   const update = useCallback(
@@ -140,11 +334,84 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       const nextUser: User = { ...user, name: nextName, email: nextEmail }
       setUser(nextUser)
       setAccounts((prev) =>
-        prev.map((acc) => (acc.id === user.id ? { ...acc, name: nextName, email: nextEmail } : acc)),
+        prev.map((acc) =>
+          acc.id === user.id ? { ...acc, name: nextName, email: nextEmail } : acc,
+        ),
       )
       return nextUser
     },
     [accounts, user],
+  )
+
+  const enableTwoFactor = useCallback(async (): Promise<EnableTwoFactorResult> => {
+    if (!user) throw new Error('Користувач не авторизований')
+    const account = accounts.find((acc) => acc.id === user.id)
+    if (!account) throw new Error('Акаунт не знайдено')
+    if (account.twoFactorEnabled) throw new Error('2FA вже увімкнено')
+    const secret = account.twoFactorSecret || generateTwoFactorSecret()
+    const recoveryCodes = generateRecoveryCodes()
+    account.twoFactorSecret = secret
+    account.twoFactorEnabled = true
+    account.recoveryCodes = recoveryCodes
+    const currentCode = generateTwoFactorCode(secret)
+    const nextUser: User = { ...user, twoFactorEnabled: true }
+    setUser(nextUser)
+    setAccounts((prev) => prev.map((acc) => (acc.id === account.id ? { ...account } : acc)))
+    return { secret, recoveryCodes, currentCode }
+  }, [accounts, user])
+
+  const disableTwoFactor = useCallback(async () => {
+    if (!user) throw new Error('Користувач не авторизований')
+    const account = accounts.find((acc) => acc.id === user.id)
+    if (!account) throw new Error('Акаунт не знайдено')
+    if (!account.twoFactorEnabled) return
+    account.twoFactorEnabled = false
+    account.twoFactorSecret = generateTwoFactorSecret()
+    const refreshedCodes = generateRecoveryCodes()
+    account.recoveryCodes = refreshedCodes
+    const nextUser: User = { ...user, twoFactorEnabled: false }
+    setUser(nextUser)
+    setAccounts((prev) => prev.map((acc) => (acc.id === account.id ? { ...account } : acc)))
+  }, [accounts, user])
+
+  const regenerateRecoveryCodes = useCallback(async () => {
+    if (!user) throw new Error('Користувач не авторизований')
+    const account = accounts.find((acc) => acc.id === user.id)
+    if (!account) throw new Error('Акаунт не знайдено')
+    const codes = generateRecoveryCodes()
+    account.recoveryCodes = codes
+    setAccounts((prev) => prev.map((acc) => (acc.id === account.id ? { ...account } : acc)))
+    return codes
+  }, [accounts, user])
+
+  const getRecoveryCodes = useCallback(async () => {
+    if (!user) throw new Error('Користувач не авторизований')
+    const account = accounts.find((acc) => acc.id === user.id)
+    if (!account) throw new Error('Акаунт не знайдено')
+    return [...account.recoveryCodes]
+  }, [accounts, user])
+
+  const recoverAccount = useCallback(
+    async ({ email, recoveryCode, newPassword }: RecoverAccountPayload): Promise<RecoverAccountResult> => {
+      const normalizedEmail = normalizeEmail(email)
+      const account = accounts.find((acc) => acc.email === normalizedEmail)
+      if (!account) throw new Error('Акаунт із таким email не знайдено')
+      const code = normalizeCode(recoveryCode)
+      const rollback = account.recoveryCodes.some((c) => normalizeCode(c) === code)
+      if (!rollback) throw new Error('Неправильний резервний код')
+      if (newPassword.trim().length < 6) throw new Error('Новий пароль має містити щонайменше 6 символів')
+      account.password = newPassword.trim()
+      account.twoFactorEnabled = false
+      account.twoFactorSecret = generateTwoFactorSecret()
+      const newCodes = generateRecoveryCodes()
+      account.recoveryCodes = newCodes
+      setAccounts((prev) => prev.map((acc) => (acc.id === account.id ? { ...account } : acc)))
+      return {
+        recoveryCodes: newCodes,
+        message: 'Пароль змінено. 2FA вимкнено, ви можете увімкнути його знову після входу.',
+      }
+    },
+    [accounts],
   )
 
   const value = useMemo(
@@ -152,10 +419,28 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       user,
       register,
       login,
+      verifyTwoFactor,
       logout,
       update,
+      enableTwoFactor,
+      disableTwoFactor,
+      regenerateRecoveryCodes,
+      getRecoveryCodes,
+      recoverAccount,
     }),
-    [user, register, login, logout, update],
+    [
+      user,
+      register,
+      login,
+      verifyTwoFactor,
+      logout,
+      update,
+      enableTwoFactor,
+      disableTwoFactor,
+      regenerateRecoveryCodes,
+      getRecoveryCodes,
+      recoverAccount,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
