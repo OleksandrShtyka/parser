@@ -10,7 +10,7 @@ import tempfile
 import traceback
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote as urlquote
 
 try:
     from yt_dlp import YoutubeDL
@@ -29,6 +29,11 @@ SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"
 SMTP_TIMEOUT = float(os.getenv("SMTP_TIMEOUT", "10"))
 APP_NAME = os.getenv("APP_NAME", "Parser")
 YTDLP_COOKIES = os.getenv("YTDLP_COOKIES")  # optional cookies.txt path for YouTube
+YTDLP_YOUTUBE_CLIENTS = [
+    client.strip()
+    for client in os.getenv("YTDLP_YOUTUBE_CLIENTS", "android,ios").split(",")
+    if client.strip()
+]
 
 
 def _build_yt_dlp_opts(*, download: bool, outtmpl: str | None = None) -> dict:
@@ -44,13 +49,13 @@ def _build_yt_dlp_opts(*, download: bool, outtmpl: str | None = None) -> dict:
             "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 6 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "ios", "tv"],
-                "skip": ["dash"],
-            }
-        },
+        "extractor_args": {},
     }
+    if YTDLP_YOUTUBE_CLIENTS:
+        opts.setdefault("extractor_args", {})["youtube"] = {
+            "player_client": YTDLP_YOUTUBE_CLIENTS.copy(),
+            "skip": ["dash"],
+        }
     if download:
         if outtmpl:
             opts["outtmpl"] = outtmpl
@@ -197,6 +202,19 @@ class YTDLPHandler(BaseHTTPRequestHandler):
                 "format_note": fmt.get("format_note"),
             }
 
+        formats = [map_format(f) for f in info.get("formats", []) if f.get("ext") in ("mp4", "webm", "m4a", "mp3")]
+        if not formats:
+            _json_response(
+                self,
+                400,
+                {
+                    "error": (
+                        "Не вдалося отримати відеоформати. Оновіть yt-dlp, додайте cookies (YTDLP_COOKIES) або спробуйте пізніше."
+                    )
+                },
+            )
+            return
+
         data = {
             "id": info.get("id"),
             "title": info.get("title"),
@@ -204,7 +222,7 @@ class YTDLPHandler(BaseHTTPRequestHandler):
             "thumbnail": info.get("thumbnail"),
             "uploader": info.get("uploader"),
             "webpage_url": info.get("webpage_url"),
-            "formats": [map_format(f) for f in info.get("formats", []) if f.get("ext") in ("mp4", "webm", "m4a", "mp3")],
+            "formats": formats,
         }
         _json_response(self, 200, data)
 
@@ -275,7 +293,15 @@ class YTDLPHandler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
+        disposition = None
+        try:
+            filename.encode("latin-1")
+            disposition = f'attachment; filename="{filename}"'
+        except UnicodeEncodeError:
+            fallback = "".join(ch for ch in filename if ord(ch) < 128) or "download"
+            encoded = urlquote(filename)
+            disposition = f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
+        self.send_header("Content-Disposition", disposition)
         if size is not None:
             self.send_header("Content-Length", str(size))
         self.send_header("Access-Control-Allow-Origin", "*")
