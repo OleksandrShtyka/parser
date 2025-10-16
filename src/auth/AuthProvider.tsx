@@ -21,8 +21,11 @@ type StoredAccount = {
   createdAt: string
   password: string
   twoFactorEnabled: boolean
+  emailVerified: boolean
   twoFactorSecret?: string
   recoveryCodes: string[]
+  verificationCode?: string
+  verificationExpiresAt?: number
 }
 
 type TwoFactorChallenge = {
@@ -33,7 +36,9 @@ type TwoFactorChallenge = {
 
 const ACTIVE_USER_KEY = 'user'
 const ACCOUNTS_KEY = 'auth:accounts'
+const PENDING_VERIFICATION_KEY = 'auth:pending-verification'
 const CHALLENGE_EXPIRY_MS = 5 * 60 * 1000
+const VERIFICATION_EXPIRY_MS = 15 * 60 * 1000
 
 const createId = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
@@ -51,7 +56,14 @@ const normalizeCode = (code: string) => code.replace(/\s+/g, '').toUpperCase()
 
 const toUser = (raw: unknown): User | null => {
   if (!raw || typeof raw !== 'object') return null
-  const record = raw as Partial<User> & { name?: unknown; email?: unknown; id?: unknown; createdAt?: unknown; twoFactorEnabled?: unknown }
+  const record = raw as Partial<User> & {
+    name?: unknown
+    email?: unknown
+    id?: unknown
+    createdAt?: unknown
+    twoFactorEnabled?: unknown
+    emailVerified?: unknown
+  }
   const name = typeof record.name === 'string' ? normalizeName(record.name) : 'Користувач'
   const email = typeof record.email === 'string' ? normalizeEmail(record.email) : ''
   const id = typeof record.id === 'string' && record.id ? record.id : createId()
@@ -60,16 +72,19 @@ const toUser = (raw: unknown): User | null => {
       ? record.createdAt
       : new Date().toISOString()
   const twoFactorEnabled = typeof record.twoFactorEnabled === 'boolean' ? record.twoFactorEnabled : false
-  return { id, name, email, createdAt, twoFactorEnabled }
+  const emailVerified = typeof record.emailVerified === 'boolean' ? record.emailVerified : true
+  return { id, name, email, createdAt, twoFactorEnabled, emailVerified }
 }
 
 const randomFrom = <T,>(items: ReadonlyArray<T>) => items[Math.floor(Math.random() * items.length)]
 
+const RECOVERY_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'.split('')
+const TWO_FACTOR_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'.split('')
+
 const generateRecoveryCode = () => {
-  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
   const part = () =>
     Array.from({ length: 4 })
-      .map(() => randomFrom(alphabet))
+      .map(() => randomFrom(RECOVERY_CODE_ALPHABET))
       .join('')
   return `${part()}-${part()}`
 }
@@ -77,10 +92,44 @@ const generateRecoveryCode = () => {
 const generateRecoveryCodes = (count = 6) => Array.from({ length: count }, generateRecoveryCode)
 
 const generateTwoFactorSecret = () => {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
   return Array.from({ length: 16 })
-    .map(() => randomFrom(alphabet))
+    .map(() => randomFrom(TWO_FACTOR_ALPHABET))
     .join('')
+}
+
+const createVerificationCode = () => Math.floor(100000 + Math.random() * 900000).toString()
+
+const sendVerificationEmail = async ({ email, code, name }: { email: string; code: string; name: string }) => {
+  if (typeof window === 'undefined') return
+  try {
+    const res = await fetch('/api/send-verification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, code, name }),
+    })
+    if (!res.ok) {
+      let reason = res.statusText || 'Не вдалося надіслати лист'
+      try {
+        const data = await res.json()
+        if (data && typeof data === 'object' && 'error' in data && typeof data.error === 'string') {
+          reason = data.error
+        }
+      } catch {
+        // ignore JSON issues
+      }
+      throw new Error(reason)
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? `${error.message}${
+            error.message.includes('Failed to fetch') || error.message.includes('Network')
+              ? '. Переконайтесь, що API сервер запущено (python server.py).'
+              : ''
+          }`
+        : 'Не вдалося надіслати лист підтвердження'
+    throw new Error(message)
+  }
 }
 
 const hashString = (value: string) => {
@@ -120,9 +169,16 @@ const toStoredAccount = (raw: unknown): StoredAccount | null => {
     email: base.email,
     createdAt: base.createdAt,
     twoFactorEnabled: base.twoFactorEnabled,
+    emailVerified: typeof record.emailVerified === 'boolean' ? record.emailVerified : true,
     password: record.password,
     twoFactorSecret: record.twoFactorSecret && typeof record.twoFactorSecret === 'string' ? record.twoFactorSecret : undefined,
     recoveryCodes: recoveryCodes.length ? recoveryCodes : generateRecoveryCodes(),
+    verificationCode:
+      record.verificationCode && typeof record.verificationCode === 'string'
+        ? record.verificationCode
+        : undefined,
+    verificationExpiresAt:
+      typeof record.verificationExpiresAt === 'number' ? record.verificationExpiresAt : undefined,
   }
 }
 
@@ -154,6 +210,22 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     }
   })
 
+  const [pendingVerification, setPendingVerification] = useState<{ email: string; expiresAt: string | null } | null>(() => {
+    if (typeof window === 'undefined') return null
+    try {
+      const raw = localStorage.getItem(PENDING_VERIFICATION_KEY)
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object') return null
+      const email = typeof parsed.email === 'string' ? normalizeEmail(parsed.email) : null
+      if (!email) return null
+      const expiresAt = typeof parsed.expiresAt === 'string' ? parsed.expiresAt : null
+      return { email, expiresAt }
+    } catch {
+      return null
+    }
+  })
+
   useEffect(() => {
     if (typeof window === 'undefined') return
     try {
@@ -172,6 +244,19 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       /* ignore persistence issues */
     }
   }, [accounts])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      if (pendingVerification) {
+        localStorage.setItem(PENDING_VERIFICATION_KEY, JSON.stringify(pendingVerification))
+      } else {
+        localStorage.removeItem(PENDING_VERIFICATION_KEY)
+      }
+    } catch {
+      /* ignore persistence issues */
+    }
+  }, [pendingVerification])
 
   const cleanupChallenges = useCallback(() => {
     setChallenges((prev) => {
@@ -196,31 +281,50 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       const normalizedName = normalizeName(name)
       if (!normalizedEmail) throw new Error('Вкажіть email')
       if (!password || password.trim().length < 6) throw new Error('Пароль має містити щонайменше 6 символів')
-      const exists = accounts.some((acc) => acc.email === normalizedEmail)
-      if (exists) throw new Error('Користувач з таким email вже існує')
-      const now = new Date().toISOString()
-      const newRecoveryCodes = generateRecoveryCodes()
-      const secret = generateTwoFactorSecret()
-      const newAccount: StoredAccount = {
-        id: createId(),
+      const existing = accounts.find((acc) => acc.email === normalizedEmail)
+      if (existing && existing.emailVerified) throw new Error('Користувач з таким email вже існує')
+
+      const trimmedPassword = password.trim()
+      const recoveryCodes = generateRecoveryCodes()
+      const verificationCode = createVerificationCode()
+      const expiresAtTs = Date.now() + VERIFICATION_EXPIRY_MS
+      const expiresAtIso = new Date(expiresAtTs).toISOString()
+      const accountId = existing?.id ?? createId()
+      const createdAt = existing?.createdAt ?? new Date().toISOString()
+      const secret = existing?.twoFactorSecret ?? generateTwoFactorSecret()
+
+      await sendVerificationEmail({ email: normalizedEmail, code: verificationCode, name: normalizedName })
+
+      const nextAccount: StoredAccount = {
+        id: accountId,
         name: normalizedName,
         email: normalizedEmail,
-        createdAt: now,
-        password: password.trim(),
+        createdAt,
+        password: trimmedPassword,
         twoFactorEnabled: false,
+        emailVerified: false,
         twoFactorSecret: secret,
-        recoveryCodes: newRecoveryCodes,
+        recoveryCodes,
+        verificationCode,
+        verificationExpiresAt: expiresAtTs,
       }
-      setAccounts((prev) => [...prev, newAccount])
-      const newUser: User = {
-        id: newAccount.id,
-        name: newAccount.name,
-        email: newAccount.email,
-        createdAt: newAccount.createdAt,
-        twoFactorEnabled: newAccount.twoFactorEnabled,
+
+      setAccounts((prev) => {
+        const existsById = prev.some((acc) => acc.id === accountId)
+        if (existsById) {
+          return prev.map((acc) => (acc.id === accountId ? nextAccount : acc))
+        }
+        return [...prev, nextAccount]
+      })
+
+      setPendingVerification({ email: normalizedEmail, expiresAt: expiresAtIso })
+
+      return {
+        status: 'pending-verification',
+        email: normalizedEmail,
+        recoveryCodes,
+        expiresAt: expiresAtIso,
       }
-      setUser(newUser)
-      return { user: newUser, recoveryCodes: newRecoveryCodes }
     },
     [accounts],
   )
@@ -246,6 +350,15 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       if (!account || account.password !== password.trim()) {
         throw new Error('Неправильний email або пароль')
       }
+      if (!account.emailVerified) {
+        const expiresAtIso = account.verificationExpiresAt ? new Date(account.verificationExpiresAt).toISOString() : null
+        setPendingVerification({ email: account.email, expiresAt: expiresAtIso })
+        return {
+          status: 'needs-verification',
+          email: account.email,
+          message: 'Потрібно підтвердити email. Введіть код із листа або надішліть новий.',
+        }
+      }
       if (account.twoFactorEnabled) {
         if (code && account.twoFactorSecret && verifyTwoFactorCode(account.twoFactorSecret, code)) {
           const nextUser: User = {
@@ -254,12 +367,15 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
             email: account.email,
             createdAt: account.createdAt,
             twoFactorEnabled: true,
+            emailVerified: account.emailVerified,
           }
           setUser(nextUser)
+          setPendingVerification(null)
           return { status: 'success', user: nextUser }
         }
         const challenge = issueChallenge(account)
         if (code) throw new Error('Невірний код двофакторної перевірки')
+        setPendingVerification(null)
         return { status: 'two-factor', challengeId: challenge.challengeId, message: challenge.message }
       }
       const nextUser: User = {
@@ -268,11 +384,88 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
         email: account.email,
         createdAt: account.createdAt,
         twoFactorEnabled: false,
+        emailVerified: account.emailVerified,
       }
       setUser(nextUser)
+      setPendingVerification(null)
       return { status: 'success', user: nextUser }
     },
     [accounts, issueChallenge],
+  )
+
+  const verifyEmail = useCallback(
+    async (email: string, code: string) => {
+      const normalizedEmail = normalizeEmail(email)
+      const sanitizedCode = normalizeCode(code)
+      if (!normalizedEmail) throw new Error('Вкажіть email')
+      if (!sanitizedCode) throw new Error('Введіть код підтвердження')
+      const account = accounts.find((acc) => acc.email === normalizedEmail)
+      if (!account) throw new Error('Акаунт не знайдено')
+      if (account.emailVerified) {
+        const existingUser: User = {
+          id: account.id,
+          name: account.name,
+          email: account.email,
+          createdAt: account.createdAt,
+          twoFactorEnabled: account.twoFactorEnabled,
+          emailVerified: true,
+        }
+        setUser(existingUser)
+        setPendingVerification(null)
+        return existingUser
+      }
+      if (!account.verificationCode) {
+        throw new Error('Код підтвердження не збережено. Надішліть новий.')
+      }
+      if (account.verificationCode !== sanitizedCode) {
+        throw new Error('Невірний код підтвердження')
+      }
+      if (account.verificationExpiresAt && account.verificationExpiresAt < Date.now()) {
+        throw new Error('Код підтвердження протермінований. Надішліть новий.')
+      }
+      const updatedAccount: StoredAccount = {
+        ...account,
+        emailVerified: true,
+        verificationCode: undefined,
+        verificationExpiresAt: undefined,
+      }
+      const nextUser: User = {
+        id: updatedAccount.id,
+        name: updatedAccount.name,
+        email: updatedAccount.email,
+        createdAt: updatedAccount.createdAt,
+        twoFactorEnabled: updatedAccount.twoFactorEnabled,
+        emailVerified: true,
+      }
+      setAccounts((prev) => prev.map((acc) => (acc.id === updatedAccount.id ? updatedAccount : acc)))
+      setUser(nextUser)
+      setPendingVerification(null)
+      return nextUser
+    },
+    [accounts],
+  )
+
+  const resendVerification = useCallback(
+    async (email: string) => {
+      const normalizedEmail = normalizeEmail(email)
+      if (!normalizedEmail) throw new Error('Вкажіть email')
+      const account = accounts.find((acc) => acc.email === normalizedEmail)
+      if (!account) throw new Error('Акаунт не знайдено')
+      if (account.emailVerified) throw new Error('Email вже підтверджено')
+      const verificationCode = createVerificationCode()
+      const expiresAtTs = Date.now() + VERIFICATION_EXPIRY_MS
+      const expiresAtIso = new Date(expiresAtTs).toISOString()
+      await sendVerificationEmail({ email: normalizedEmail, code: verificationCode, name: account.name })
+      const updatedAccount: StoredAccount = {
+        ...account,
+        verificationCode,
+        verificationExpiresAt: expiresAtTs,
+        emailVerified: false,
+      }
+      setAccounts((prev) => prev.map((acc) => (acc.id === updatedAccount.id ? updatedAccount : acc)))
+      setPendingVerification({ email: normalizedEmail, expiresAt: expiresAtIso })
+    },
+    [accounts],
   )
 
   const verifyTwoFactor = useCallback(
@@ -303,8 +496,10 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
         email: account.email,
         createdAt: account.createdAt,
         twoFactorEnabled: account.twoFactorEnabled,
+        emailVerified: account.emailVerified,
       }
       setUser(nextUser)
+      setPendingVerification(null)
       setAccounts((prev) => prev.map((acc) => (acc.id === account.id ? { ...account } : acc)))
       setChallenges((prev) => {
         const { [challengeId]: _, ...rest } = prev
@@ -420,6 +615,9 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       register,
       login,
       verifyTwoFactor,
+      verifyEmail,
+      resendVerification,
+      pendingVerification,
       logout,
       update,
       enableTwoFactor,
@@ -433,6 +631,9 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       register,
       login,
       verifyTwoFactor,
+      verifyEmail,
+      resendVerification,
+      pendingVerification,
       logout,
       update,
       enableTwoFactor,

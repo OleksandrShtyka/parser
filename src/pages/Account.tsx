@@ -22,6 +22,9 @@ export default function Account() {
     login,
     register,
     verifyTwoFactor,
+    verifyEmail,
+    resendVerification,
+    pendingVerification,
     enableTwoFactor,
     disableTwoFactor,
     regenerateRecoveryCodes,
@@ -44,6 +47,7 @@ export default function Account() {
   const [twoFactorInfo, setTwoFactorInfo] = useState<{ secret: string; recoveryCodes: string[]; currentCode: string } | null>(null)
   const [visibleRecoveryCodes, setVisibleRecoveryCodes] = useState<string[] | null>(null)
   const [registerCodes, setRegisterCodes] = useState<string[] | null>(null)
+  const [verificationCode, setVerificationCode] = useState('')
 
   useEffect(() => {
     if (user) {
@@ -69,6 +73,15 @@ export default function Account() {
     }
   }, [user])
 
+  useEffect(() => {
+    if (pendingVerification?.email) {
+      setAuthForm((prev) => ({ ...prev, email: pendingVerification.email }))
+    }
+    if (!pendingVerification) {
+      setVerificationCode('')
+    }
+  }, [pendingVerification])
+
   const setAuthField = useCallback(
     (key: keyof typeof initialForm) => (value: string) => {
       setAuthForm((prev) => ({ ...prev, [key]: value }))
@@ -93,9 +106,14 @@ export default function Account() {
         setTwoFactorInputs(initialTwoFactorInputs)
         setTwoFactorChallenge(null)
         setStatus({ type: 'success', text: 'Вітаємо, ви увійшли!' })
-      } else {
+      } else if (result.status === 'two-factor') {
         setTwoFactorChallenge({ id: result.challengeId, message: result.message })
         setStatus({ type: 'success', text: 'Пароль вірний. Введіть код підтвердження.' })
+      } else {
+        setTwoFactorChallenge(null)
+        setTwoFactorInputs(initialTwoFactorInputs)
+        setStatus({ type: 'success', text: result.message })
+        setMode('register')
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Не вдалося увійти'
@@ -137,9 +155,59 @@ export default function Account() {
       const result = await register({ name: authForm.name, email: authForm.email, password: authForm.password })
       setRegisterCodes(result.recoveryCodes)
       setAuthForm(initialForm)
-      setStatus({ type: 'success', text: 'Реєстрація успішна. Збережіть резервні коди.' })
+      if (result.status === 'pending-verification') {
+        setStatus({
+          type: 'success',
+          text: `Реєстрація успішна. Збережіть резервні коди та підтвердіть email (${result.email}).`,
+        })
+      } else {
+        setStatus({ type: 'success', text: 'Реєстрація успішна. Збережіть резервні коди.' })
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Не вдалося зареєструватися'
+      setStatus({ type: 'error', text: message })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleVerifyEmail = async () => {
+    const emailToVerify = pendingVerification?.email || authForm.email
+    if (!emailToVerify.trim()) {
+      setStatus({ type: 'error', text: 'Вкажіть email для підтвердження' })
+      return
+    }
+    if (!verificationCode.trim()) {
+      setStatus({ type: 'error', text: 'Введіть код підтвердження' })
+      return
+    }
+    setLoading(true)
+    setStatus(null)
+    try {
+      await verifyEmail(emailToVerify, verificationCode)
+      setVerificationCode('')
+      setStatus({ type: 'success', text: 'Email підтверджено. Ви авторизовані.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не вдалося підтвердити email'
+      setStatus({ type: 'error', text: message })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleResendVerification = async () => {
+    const emailToVerify = pendingVerification?.email || authForm.email
+    if (!emailToVerify.trim()) {
+      setStatus({ type: 'error', text: 'Вкажіть email для повторної відправки' })
+      return
+    }
+    setLoading(true)
+    setStatus(null)
+    try {
+      await resendVerification(emailToVerify)
+      setStatus({ type: 'success', text: `Новий код відправлено на ${emailToVerify}` })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не вдалося надіслати код повторно'
       setStatus({ type: 'error', text: message })
     } finally {
       setLoading(false)
@@ -445,6 +513,34 @@ export default function Account() {
                   Забули пароль? Відновлення
                 </button>
               )}
+            </div>
+          </div>
+        )}
+
+        {pendingVerification && (
+          <div className="accountForm wide" style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12 }}>
+            <div className="muted">
+              Підтвердіть email <strong>{pendingVerification.email}</strong>, ввівши код із листа.
+            </div>
+            {pendingVerification.expiresAt && (
+              <div className="muted" style={{ fontSize: 13 }}>
+                Код дійсний до {new Date(pendingVerification.expiresAt).toLocaleString()}
+              </div>
+            )}
+            <input
+              className="input"
+              placeholder="Код підтвердження"
+              value={verificationCode}
+              onChange={(e) => setVerificationCode(e.target.value)}
+              inputMode="numeric"
+            />
+            <div className="accountActions">
+              <button onClick={handleVerifyEmail} disabled={loading}>
+                {loading ? 'Зачекайте…' : 'Підтвердити email'}
+              </button>
+              <button className="ghost" onClick={handleResendVerification} disabled={loading}>
+                Надіслати код повторно
+              </button>
             </div>
           </div>
         )}

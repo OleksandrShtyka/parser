@@ -4,10 +4,12 @@ import io
 import json
 import os
 import shutil
+import smtplib
 import sys
 import tempfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import traceback
+from email.message import EmailMessage
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 try:
@@ -15,6 +17,99 @@ try:
 except Exception as exc:  # pragma: no cover
     sys.stderr.write("yt-dlp is required. Install: pip install yt-dlp\n")
     raise
+
+
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USERNAME or ""
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() not in {"0", "false", "no"}
+SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}
+SMTP_TIMEOUT = float(os.getenv("SMTP_TIMEOUT", "10"))
+APP_NAME = os.getenv("APP_NAME", "Parser")
+YTDLP_COOKIES = os.getenv("YTDLP_COOKIES")  # optional cookies.txt path for YouTube
+
+
+def _build_yt_dlp_opts(*, download: bool, outtmpl: str | None = None) -> dict:
+    """Construct base yt-dlp options with modern YouTube mitigations."""
+    opts: dict = {
+        "quiet": True,
+        "noplaylist": True,
+        "noprogress": True,
+        "retries": 3,
+        "skip_unavailable_fragments": True,
+        "extractor_retries": 3,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 6 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "tv"],
+                "skip": ["dash"],
+            }
+        },
+    }
+    if download:
+        if outtmpl:
+            opts["outtmpl"] = outtmpl
+        opts["merge_output_format"] = "mp4"
+    else:
+        opts["skip_download"] = True
+
+    if YTDLP_COOKIES and os.path.exists(YTDLP_COOKIES):
+        opts["cookiefile"] = YTDLP_COOKIES
+
+    return opts
+
+
+def _send_verification_email(email: str, code: str, name: str) -> bool:
+    """Send a verification email using configured SMTP settings.
+
+    Returns True when email was sent via SMTP, False when running in dev fallback mode.
+    """
+    if not SMTP_HOST:
+        sys.stderr.write(
+            f"[dev-mailer] SMTP not configured. Verification code for {email}: {code}\n"
+        )
+        return False
+
+    sender = SMTP_FROM or SMTP_USERNAME
+    if not sender:
+        raise RuntimeError("SMTP_FROM or SMTP_USERNAME must be provided")
+
+    display_name = name.strip() or "користувачу"
+    subject = f"{APP_NAME} — код підтвердження"
+    body = (
+        f"Привіт, {display_name}!\n\n"
+        f"Ваш код підтвердження: {code}\n\n"
+        "Код діє протягом 15 хвилин. Якщо це були не ви, просто проігноруйте лист.\n\n"
+        f"З повагою,\nКоманда {APP_NAME}"
+    )
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = sender
+    message["To"] = email
+    message.set_content(body)
+
+    try:
+        if SMTP_USE_SSL:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) as smtp:
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD or "")
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) as smtp:
+                if SMTP_USE_TLS:
+                    smtp.starttls()
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD or "")
+                smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:  # pragma: no cover - network interaction
+        raise RuntimeError(f"SMTP error: {exc}") from exc
+    return True
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, data: dict) -> None:
@@ -55,6 +150,8 @@ class YTDLPHandler(BaseHTTPRequestHandler):
         try:
             if self.path == "/api/info":
                 return self._post_info()
+            if self.path == "/api/send-verification":
+                return self._post_send_verification()
             _json_response(self, 404, {"error": "Not found"})
         except Exception as exc:  # safety net to avoid 500 HTML
             traceback.print_exc()
@@ -80,11 +177,7 @@ class YTDLPHandler(BaseHTTPRequestHandler):
         if not url:
             _json_response(self, 400, {"error": "Missing url"})
             return
-        opts = {
-            "quiet": True,
-            "skip_download": True,
-            "noplaylist": True,
-        }
+        opts = _build_yt_dlp_opts(download=False)
         try:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -115,6 +208,26 @@ class YTDLPHandler(BaseHTTPRequestHandler):
         }
         _json_response(self, 200, data)
 
+    def _post_send_verification(self) -> None:
+        payload = self._parse_json()
+        email = (payload.get("email") or "").strip()
+        code = (payload.get("code") or "").strip()
+        name = (payload.get("name") or "").strip()
+        if not email or not code:
+            _json_response(self, 400, {"error": "Missing email or code"})
+            return
+        try:
+            sent = _send_verification_email(email, code, name)
+        except RuntimeError as exc:
+            _json_response(self, 500, {"error": str(exc)})
+            return
+        payload = {"ok": True, "sent": sent}
+        if not sent:
+            payload[
+                "message"
+            ] = "SMTP не налаштовано. Код підтвердження записано у лог серверу (dev режим)."
+        _json_response(self, 200, payload)
+
     def _get_download(self, parsed) -> None:
         qs = parse_qs(parsed.query)
         url = (qs.get("url", [""])[0] or "").strip()
@@ -126,12 +239,7 @@ class YTDLPHandler(BaseHTTPRequestHandler):
         tmpdir = tempfile.mkdtemp(prefix="ytdlp_")
         output_tmpl = os.path.join(tmpdir, "%(title).70s.%(ext)s")
 
-        opts = {
-            "outtmpl": output_tmpl,
-            "quiet": True,
-            "noplaylist": True,
-            "merge_output_format": "mp4",
-        }
+        opts = _build_yt_dlp_opts(download=True, outtmpl=output_tmpl)
         if format_id:
             opts["format"] = format_id
 

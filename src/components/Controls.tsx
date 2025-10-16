@@ -22,7 +22,7 @@ export default function Controls({ url, setUrl, onFetch, loading }: Props) {
         <input
           className="input"
           type="url"
-          placeholder="https://www.youtube.com/watch?v=..."
+          placeholder="https://... (YouTube або TikTok)"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           aria-label="Посилання на відео"
