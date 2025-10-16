@@ -469,13 +469,20 @@
   color: var(--text);
   font-weight: 600;
   border: 1px solid rgba(110,195,255,0.4);
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  box-shadow: 0 12px 22px rgba(5,12,20,0.35);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, opacity 0.25s ease;
   text-decoration: none;
+  cursor: pointer;
 }
 
-.itemAction:hover {
+.itemAction:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 12px 22px rgba(5,12,20,0.4);
+}
+
+.itemAction:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .panel {
@@ -576,10 +583,86 @@
   flex-wrap: wrap;
   margin-top: 8px;
 }
+.accountActions.wrap {
+  justify-content: flex-start;
+}
 
 .muted {
   color: rgba(225,234,255,0.65);
   font-size: 14px;
+}
+
+.codesBox {
+  margin-top: 12px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: linear-gradient(150deg, rgba(12,26,42,0.75), rgba(12,26,42,0.45));
+  border: 1px solid rgba(255,255,255,0.16);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 16px 28px rgba(5,12,20,0.45);
+}
+
+.codesBox ul {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.codesBox code {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: rgba(110,195,255,0.14);
+  border: 1px solid rgba(110,195,255,0.3);
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+.twoFactor {
+  margin-top: 28px;
+  padding: 24px 26px;
+  border-radius: 24px;
+  background: linear-gradient(155deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05));
+  border: 1px solid rgba(255,255,255,0.18);
+  box-shadow: 0 18px 40px rgba(5,12,20,0.45);
+  display: grid;
+  gap: 16px;
+}
+
+.twoFactor header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.twoFactor h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.badge.is-on {
+  color: #052033;
+  background: rgba(110,195,255,0.7);
+  border-color: rgba(110,195,255,0.6);
+}
+
+.badge.is-off {
+  color: rgba(225,234,255,0.75);
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.16);
 }
 
 .cardAppear {
@@ -595,6 +678,8 @@
   .nav { width: 100%; justify-content: center; }
   .topbar { justify-content: center; }
   .userChip { width: 100%; justify-content: center; }
+  .twoFactor { padding: 20px; }
+  .codesBox ul { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); }
 }
 
 @media (max-width: 600px) {

@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 type Format = {
   format_id: string
   ext: string
@@ -32,6 +34,9 @@ function humanSize(bytes?: number | null) {
 }
 
 export default function VideoInfo({ info, filter, setFilter, url }: { info: VideoInfo; filter: 'all' | 'video' | 'audio'; setFilter: (v: 'all' | 'video' | 'audio') => void; url: string }) {
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
+
   const filteredFormats = info.formats.filter((f) => {
     const isAudioOnly = f.vcodec === 'none'
     const isVideo = !isAudioOnly
@@ -39,6 +44,28 @@ export default function VideoInfo({ info, filter, setFilter, url }: { info: Vide
     if (filter === 'video') return isVideo
     return true
   })
+
+  const openDownload = (format: Format) => {
+    if (!format.format_id) {
+      setDownloadError('Формат недоступний для завантаження')
+      return
+    }
+    setDownloadError(null)
+    setDownloadingId(format.format_id)
+    try {
+      const downloadUrl = new URL('/api/download', window.location.origin)
+      downloadUrl.searchParams.set('url', url)
+      downloadUrl.searchParams.set('format_id', format.format_id)
+      const popup = window.open(downloadUrl.toString(), '_blank', 'noopener')
+      if (!popup) {
+        window.location.href = downloadUrl.toString()
+      }
+    } catch {
+      setDownloadError('Не вдалося відкрити посилання на завантаження')
+    } finally {
+      setTimeout(() => setDownloadingId((current) => (current === format.format_id ? null : current)), 1200)
+    }
+  }
 
   return (
     <div className="videoInfo cardAppear">
@@ -77,22 +104,36 @@ export default function VideoInfo({ info, filter, setFilter, url }: { info: Vide
         {filteredFormats.length === 0 && <div style={{ opacity: 0.8 }}>Немає доступних форматів</div>}
         {filteredFormats.map((f, idx) => {
           const label = [f.ext?.toUpperCase(), f.resolution || (f.abr ? `${f.abr}kbps` : ''), f.format_note].filter(Boolean).join(' • ')
-          const dlUrl = `/api/download?url=${encodeURIComponent(url)}&format_id=${encodeURIComponent(f.format_id)}`
           return (
             <div key={f.format_id + label} className="item surface" style={{ animationDelay: `${idx * 60}ms` }}>
               <div>
                 <div className="itemTitle">{label}</div>
                 <div className="itemMeta">{f.vcodec === 'none' ? 'Аудіо' : 'Відео'} {f.filesize ? `• ${humanSize(f.filesize)}` : ''}</div>
               </div>
-              <a href={dlUrl} className="itemAction">
-                <span>Завантажити</span>
+              <button
+                type="button"
+                className="itemAction"
+                onClick={() => openDownload(f)}
+                disabled={downloadingId === f.format_id}
+              >
+                <span>{downloadingId === f.format_id ? 'Відкриваємо…' : 'Завантажити'}</span>
                 <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 5v12m0 0-4-4m4 4 4-4M5 19h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                 </svg>
-              </a>
+              </button>
             </div>
           )
         })}
+        {downloadError && (
+          <div className="accountAlert is-error" role="alert" style={{ marginTop: 8 }}>
+            {downloadError}
+          </div>
+        )}
+        {!downloadError && (
+          <div className="muted" style={{ fontSize: 13 }}>
+            Якщо завантаження не починається автоматично, переконайтесь, що API сервер запущено (`python server.py`) і браузер не блокує спливаючі вікна.
+          </div>
+        )}
       </div>
     </div>
   )
