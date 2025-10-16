@@ -1,0 +1,85 @@
+:root {
+  --bg0: #0a1420;
+  --bg1: #102235;
+  --bg2: #183b60;
+  --text: #e8f1ff;
+  --muted: #b9c6d9;
+  --primary: #6ec3ff;
+  --primary-weak: rgba(110, 195, 255, 0.25);
+  --glass: rgba(255,255,255,0.10);
+  --glass-strong: rgba(255,255,255,0.16);
+  --glass-border: rgba(255,255,255,0.28);
+  --shadow: rgba(5, 12, 20, 0.45);
+  font-family: Inter, ui-sans-serif, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  color: var(--text);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: radial-gradient(1200px 800px at 10% 10%, var(--bg2) 0%, transparent 50%),
+              radial-gradient(1000px 700px at 90% 20%, #2e5e95 0%, transparent 55%),
+              radial-gradient(1000px 900px at 30% 90%, #26486f 0%, transparent 60%),
+              linear-gradient(180deg, var(--bg1), var(--bg0));
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* animated glow blobs */
+body::before,
+body::after {
+  content: '';
+  position: absolute;
+  inset: -20vh -10vw auto auto;
+  width: 50vmax;
+  height: 50vmax;
+  background: radial-gradient(circle at 30% 30%, var(--primary-weak), transparent 60%);
+  filter: blur(60px);
+  opacity: 0.7;
+  animation: float1 18s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+body::after {
+  inset: auto auto -25vh -10vw;
+  width: 45vmax;
+  height: 45vmax;
+  animation: float2 22s ease-in-out infinite alternate;
+}
+
+@keyframes float1 { from { transform: translate3d(-5%, -5%, 0) } to { transform: translate3d(8%, 6%, 0) } }
+@keyframes float2 { from { transform: translate3d(6%, 8%, 0) } to { transform: translate3d(-6%, -4%, 0) } }
+
+@media (prefers-reduced-motion: reduce) {
+  body::before, body::after { animation: none; }
+}
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1 { margin: 0 0 12px; font-size: 32px; }
+
+button {
+  appearance: none;
+  border: 1px solid var(--glass-border);
+  background: linear-gradient(180deg, var(--glass-strong), rgba(255,255,255,0.06));
+  backdrop-filter: blur(10px);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 15px;
+  cursor: pointer;
+  transition: transform .06s ease, box-shadow .2s ease, border-color .2s ease;
+  box-shadow: 0 10px 25px var(--shadow);
+}
+button:hover { border-color: var(--primary); }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.6; cursor: not-allowed; }

@@ -3,3 +3,5 @@ yt-dlp>=2024.0.0
 pyinstaller>=6.0
 # Optional: py2app for legacy build scripts
 # py2app>=0.28
+
+Flask>=3.0
