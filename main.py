@@ -507,5 +507,129 @@ if __name__ == "__main__":
     timer.start()
 
     app.aboutToQuit.connect(timer.stop)
+    # Simple translucent loading overlay with rotating-dot animation
+    class LoadingOverlay(QWidget):
+        def __init__(self, parent: QWidget):
+            super().__init__(parent)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            self._angle = 0.0
+            self._timer = QTimer(self)
+            self._timer.setInterval(30)
+            self._timer.timeout.connect(self._tick)
+            self.hide()
 
+        def show(self) -> None:
+            self._reposition()
+            super().show()
+            self.raise_()
+            self._angle = 0.0
+            self._timer.start()
+
+        def hide(self) -> None:
+            self._timer.stop()
+            super().hide()
+
+        def _tick(self) -> None:
+            self._angle = (self._angle + 8.0) % 360.0
+            self.update()
+
+        def _reposition(self) -> None:
+            # cover the whole window content
+            parent = self.parent() or self.window()
+            self.setGeometry(parent.rect())
+
+        def paintEvent(self, event) -> None:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            # translucent backdrop
+            painter.fillRect(self.rect(), QColor(10, 14, 20, 160))
+
+            # center geometry
+            w = self.width()
+            h = self.height()
+            cx = w // 2
+            cy = h // 2
+            radius = min(w, h) // 10
+            dots = 8
+            dot_radius = max(4, radius // 8)
+
+            # title text
+            painter.setPen(QColor(230, 240, 255, 230))
+            painter.setFont(self.font())
+            painter.drawText(cx - 100, cy - radius - 32, 200, 24, Qt.AlignmentFlag.AlignCenter, "Завантаження…")
+
+            # rotating dots
+            for i in range(dots):
+                t = (360.0 / dots) * i + self._angle
+                rad = math.radians(t)
+                px = cx + int(math.cos(rad) * radius)
+                py = cy + int(math.sin(rad) * radius)
+                # fade based on angular offset to create motion illusion
+                phase = (i / dots)
+                alpha = int(160 * (0.4 + 0.6 * (0.5 + 0.5 * math.cos(math.radians((t - self._angle) % 360)))))
+                color = QColor(140, 200, 255, max(60, alpha))
+                painter.setBrush(color)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(px - dot_radius, py - dot_radius, dot_radius * 2, dot_radius * 2)
+
+        def resizeEvent(self, event) -> None:
+            self._reposition()
+            super().resizeEvent(event)
+
+
+    # create overlay and integrate with the existing MainWindow instance
+    overlay = LoadingOverlay(window)
+
+    # keep original start handler and replace the button's connection so we can show overlay
+    _original_start = window._start_download
+
+
+    def _start_with_overlay() -> None:
+        # show overlay immediately to block UI while worker/thread start
+        overlay.show()
+        try:
+            _original_start()
+        except Exception:
+            # ensure overlay hidden on unexpected error
+            overlay.hide()
+            raise
+
+        # after start, hook worker/thread signals to hide overlay when finished/failed
+        # use wildcard lambdas to accept signal arguments
+        if getattr(window, "_worker", None) is not None:
+            try:
+                window._worker.finished.connect(lambda *_: overlay.hide())
+                window._worker.failed.connect(lambda *_: overlay.hide())
+            except Exception:
+                pass
+        if getattr(window, "_download_thread", None) is not None:
+            try:
+                window._download_thread.finished.connect(lambda: overlay.hide())
+            except Exception:
+                pass
+
+
+    # reconnect the download button to our wrapper (safely disconnect existing)
+    try:
+        window.download_button.clicked.disconnect()
+    except Exception:
+        pass
+    window.download_button.clicked.connect(_start_with_overlay)
+
+    # also hide overlay if window is closed or app quits
+    app.aboutToQuit.connect(lambda: overlay.hide())
+
+    # ensure overlay follows window resizes
+    _orig_resize = window.resizeEvent
+
+
+    def _resize_and_keep_overlay(ev):
+        _orig_resize(ev)
+        overlay._reposition()
+
+
+    window.resizeEvent = _resize_and_keep_overlay
     sys.exit(app.exec())
