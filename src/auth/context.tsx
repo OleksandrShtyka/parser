@@ -6,6 +6,7 @@ export type User = {
   email: string
   createdAt: string
   twoFactorEnabled: boolean
+  emailVerified: boolean
 }
 
 export type RegisterPayload = {
@@ -14,10 +15,18 @@ export type RegisterPayload = {
   password: string
 }
 
-export type RegisterResult = {
-  user: User
-  recoveryCodes: string[]
-}
+export type RegisterResult =
+  | {
+      status: 'pending-verification'
+      email: string
+      recoveryCodes: string[]
+      expiresAt: string | null
+    }
+  | {
+      status: 'success'
+      user: User
+      recoveryCodes: string[]
+    }
 
 export type LoginPayload = {
   email: string
@@ -28,6 +37,7 @@ export type LoginPayload = {
 export type LoginResult =
   | { status: 'success'; user: User }
   | { status: 'two-factor'; challengeId: string; message: string }
+  | { status: 'needs-verification'; email: string; message: string }
 
 export type VerifyTwoFactorPayload = {
   challengeId: string
@@ -59,6 +69,9 @@ export type AuthContextValue = {
   register: (payload: RegisterPayload) => Promise<RegisterResult>
   login: (payload: LoginPayload) => Promise<LoginResult>
   verifyTwoFactor: (payload: VerifyTwoFactorPayload) => Promise<User>
+  verifyEmail: (email: string, code: string) => Promise<User>
+  resendVerification: (email: string) => Promise<void>
+  pendingVerification: { email: string; expiresAt: string | null } | null
   logout: () => void
   update: (patch: UpdatePayload) => Promise<User>
   enableTwoFactor: () => Promise<EnableTwoFactorResult>

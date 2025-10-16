@@ -45,7 +45,7 @@ function AppInner() {
     setError(null)
     setInfo(null)
     if (!url.trim()) {
-      setError('Вставте посилання на відео YouTube')
+      setError('Вставте посилання на відео (YouTube або TikTok)')
       return
     }
     setLoading(true)
@@ -103,35 +103,40 @@ function AppInner() {
   return (
     <div className="page">
       <div className="glass">
-        <div className="hero">
-          <Header />
-          <p className="subtitle">Вставте посилання, оберіть формат і завантажте.</p>
-        </div>
-
-        <div className="topbar">
-          <nav className="nav">
-            <a className={`navLink ${!isAccount ? 'is-active' : ''}`} href="#/">Головна</a>
-            <a className={`navLink ${isAccount ? 'is-active' : ''}`} href="#/account">Кабінет</a>
-          </nav>
-          <div className="userChip">
-            <span className="userIndicator" data-state={user ? 'online' : 'offline'} aria-hidden="true" />
-            <span>{user ? `Привіт, ${user.name}` : 'Неавторизований'}</span>
+        <span className="glass__halo glass__halo--pink" aria-hidden="true" />
+        <span className="glass__halo glass__halo--cyan" aria-hidden="true" />
+        <div className="glass__grid" aria-hidden="true" />
+        <div className="glass__content">
+          <div className="hero">
+            <Header />
+            <p className="subtitle">Вставте посилання з YouTube чи TikTok — оберіть ідеальний формат і миттєво заберіть відео.</p>
           </div>
+
+          <div className="topbar">
+            <nav className="nav">
+              <a className={`navLink ${!isAccount ? 'is-active' : ''}`} href="#/">Головна</a>
+              <a className={`navLink ${isAccount ? 'is-active' : ''}`} href="#/account">Кабінет</a>
+            </nav>
+            <div className="userChip">
+              <span className="userIndicator" data-state={user ? 'online' : 'offline'} aria-hidden="true" />
+              <span>{user ? `Привіт, ${user.name}` : 'Неавторизований'}</span>
+            </div>
+          </div>
+
+          {isAccount ? (
+            <section className="panel">
+              <Account />
+            </section>
+          ) : (
+            <>
+              <Controls url={url} setUrl={setUrl} onFetch={fetchInfo} loading={loading} />
+
+              {error && <div className="error" role="alert">Помилка: {error}</div>}
+
+              {info && <VideoInfo info={info} filter={filter} setFilter={setFilter} url={url} />}
+            </>
+          )}
         </div>
-
-        {isAccount ? (
-          <section className="panel">
-            <Account />
-          </section>
-        ) : (
-          <>
-            <Controls url={url} setUrl={setUrl} onFetch={fetchInfo} loading={loading} />
-
-            {error && <div className="error" role="alert">Помилка: {error}</div>}
-
-            {info && <VideoInfo info={info} filter={filter} setFilter={setFilter} url={url} />}
-          </>
-        )}
       </div>
     </div>
   )
