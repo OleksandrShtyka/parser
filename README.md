@@ -85,6 +85,7 @@ The API server (`python server.py`) can send registration confirmation codes via
 - `SMTP_TIMEOUT` – optional socket timeout in seconds (default `10`)
 - `APP_NAME` – optional label used in email subject/body (default `Parser`)
 - `YTDLP_COOKIES` – optional path to a `cookies.txt` file (exported from a browser) that yt-dlp will use for YouTube requests
+- `YTDLP_YOUTUBE_CLIENTS` – comma-separated list of YouTube client profiles passed to yt-dlp (default `android,ios`)
 
 If `SMTP_HOST` is not provided, the server switches to a development fallback: verification codes are written to the server console and the `/api/send-verification` response includes `sent: false`. Use this only locally, because emails are not actually delivered.
 
@@ -94,7 +95,9 @@ The frontend calls `POST /api/send-verification` with `{ email, code, name }`; t
 
 YouTube frequently changes their anti-automation checks. If you begin seeing `Precondition check failed`, `HTTP Error 400`, or `nsig extraction failed` errors from yt-dlp:
 
-- Update yt-dlp to the latest release (`pip install -U yt-dlp`).
+- Update yt-dlp to the latest release (`python3 -m pip install -U yt-dlp`).
 - Export fresh cookies from a logged-in browser session and point `YTDLP_COOKIES` at that file before starting `server.py`.
+- Adjust the spoofed client list via `YTDLP_YOUTUBE_CLIENTS=android,ios` (try removing `tv` or adding `web` if one client stops working).
+- If yt-dlp logs “GVS PO Token” warnings, those formats will be skipped unless you supply tokens manually (see the [PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)); the downloader will still try other available formats.
 - Retry after a short delay; throttling often clears after a few minutes.
 - Check the yt-dlp issue tracker for current breakages: https://github.com/yt-dlp/yt-dlp/issues
